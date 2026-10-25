@@ -70,9 +70,11 @@ Arc mempool requires `maxFeePerGas` ≥ 20 gwei. The app sets 25 gwei.
 
 ## Mainnet deploy (user step — not done by Studio)
 
+**Next for submission:** full click-by-click guide → [`MAINNET.md`](./MAINNET.md).
+
 Studio does **not** deploy mainnet. For the microgrant you need one real Arc mainnet USDC move through contract + app.
 
-1. Fund a deployer wallet with a **small** amount of USDC on Arc mainnet (gas is native USDC).
+1. Fund a deployer wallet with a **small** amount of USDC on Arc mainnet (gas is native USDC). Official paths only — see `MAINNET.md` (Circle PoC, [CCTP](https://docs.arc.io/integrate/exchanges/cctp-bridging), [Onramp](https://docs.arc.io/app-kit)).
 2. Export `PRIVATE_KEY` in your own shell only — never paste it into chat, Studio prompts you don’t control, or this README’s history.
 
 ```bash
