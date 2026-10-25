@@ -52,12 +52,17 @@ cp .env.example .env   # set VITE_CONTRACT_ADDRESS after deploy
 npm run dev
 ```
 
+Production builds (`npm run build`) load `app/.env.production` (mainnet contract + network — public values only). Local `npm run dev` is unchanged and still uses `.env` / defaults.
+
+**Live host:** GitHub Pages via `.github/workflows/pages.yml`. After merge to `main`, enable **Settings → Pages → Source: GitHub Actions**. Expected URL: `https://mzee04.github.io/pullpocket-/`.
+
 Env:
 
 | Variable | Values |
 | --- | --- |
 | `VITE_CONTRACT_ADDRESS` | Deployed `PullPocket` address |
 | `VITE_NETWORK` | `testnet` (default) or `mainnet` |
+| `VITE_BASE_PATH` | Optional. Default `/`. Pages CI sets `/pullpocket-/` |
 
 Networks:
 
