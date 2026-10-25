@@ -18,6 +18,9 @@ docs/
 .env
 .env.*
 !.env.example
+# Public Vite production env (contract address + network only)
+!.env.production
+!app/.env.production
 
 # App
 app/node_modules/
