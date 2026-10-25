@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PullPocket — video recording script</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Serif:ital,wght@0,500;1,500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f4f1ea;
+        --ink: #1a2421;
+        --muted: #4a5752;
+        --line: #c9c2b4;
+        --card: #fffdf8;
+        --say: #0f3d36;
+        --say-bg: #e6f2ef;
+        --accent: #b08d57;
+        --max: 42rem;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #121816;
+          --ink: #e8ebe9;
+          --muted: #9aa8a2;
+          --line: #2a3531;
+          --card: #1a221f;
+          --say: #b7e4d8;
+          --say-bg: #1c332e;
+          --accent: #d4b483;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: "IBM Plex Sans", system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+        line-height: 1.55;
+        font-size: 17px;
+      }
+      main {
+        max-width: var(--max);
+        margin: 0 auto;
+        padding: 2rem 1.25rem 4rem;
+      }
+      header {
+        margin-bottom: 1.75rem;
+        padding-bottom: 1rem;
+        border-bottom: 1px solid var(--line);
+      }
+      h1 {
+        font-size: 1.65rem;
+        line-height: 1.2;
+        margin: 0 0 0.5rem;
+        font-weight: 700;
+      }
+      .meta {
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+      h2 {
+        font-size: 1.2rem;
+        margin: 2rem 0 0.75rem;
+        font-weight: 700;
+      }
+      h3 {
+        font-size: 1.05rem;
+        margin: 1.5rem 0 0.5rem;
+        font-weight: 600;
+      }
+      p,
+      li {
+        margin: 0.45rem 0;
+      }
+      a {
+        color: var(--say);
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.92rem;
+        margin: 0.75rem 0 1rem;
+      }
+      th,
+      td {
+        text-align: left;
+        vertical-align: top;
+        padding: 0.45rem 0.5rem;
+        border-bottom: 1px solid var(--line);
+      }
+      th {
+        color: var(--muted);
+        font-weight: 600;
+      }
+      .beat {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 1rem 1.1rem 1.15rem;
+        margin: 1rem 0;
+      }
+      .label {
+        font-size: 0.8rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--accent);
+        font-weight: 600;
+        margin-bottom: 0.35rem;
+      }
+      .say {
+        font-family: "IBM Plex Serif", Georgia, serif;
+        font-style: italic;
+        font-weight: 500;
+        background: var(--say-bg);
+        color: var(--say);
+        border-left: 3px solid var(--accent);
+        padding: 0.85rem 1rem;
+        margin: 0.75rem 0 0;
+        border-radius: 0 8px 8px 0;
+      }
+      ul.check {
+        padding-left: 1.2rem;
+      }
+      .clock {
+        display: inline-block;
+        font-size: 0.85rem;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      footer {
+        margin-top: 2.5rem;
+        padding-top: 1rem;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+      code {
+        font-size: 0.9em;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>PullPocket — video recording script</h1>
+        <p class="meta">
+          DoraHacks Arc Microgrants Round 2 · target 2:00–2:45 (hard cap 3:00) ·
+          deadline Mon 2 Nov 2026, 05:59 Africa/Lagos
+        </p>
+        <p class="meta">
+          Live app:
+          <a href="./">https://mzee04.github.io/pullpocket-/</a>
+          · Markdown source:
+          <a href="https://github.com/Mzee04/pullpocket-/blob/main/VIDEO_SCRIPT.md"
+            >VIDEO_SCRIPT.md</a
+          >
+        </p>
+      </header>
+
+      <h2>Prep checklist (open before Record)</h2>
+      <p>Open these <strong>four tabs</strong> in order, already signed in / loaded:</p>
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Tab</th>
+            <th>URL</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1</td>
+            <td>Arc Studio</td>
+            <td>
+              <a href="https://studio.arc.io/app/c96255b8-c2ce-4cfb-8bc1-62044935dabc"
+                >studio.arc.io/…c96255b8…</a
+              >
+            </td>
+          </tr>
+          <tr>
+            <td>2</td>
+            <td>Live app (mainnet)</td>
+            <td>
+              <a href="https://mzee04.github.io/pullpocket-/"
+                >mzee04.github.io/pullpocket-/</a
+              >
+            </td>
+          </tr>
+          <tr>
+            <td>3</td>
+            <td>Mainnet Open tx</td>
+            <td>
+              <a
+                href="https://explorer.arc.io/tx/0xcfa16ab6c437fd177c4383643235a73a9b46fcf67507cf074fe77f6c792d52a3"
+                >explorer.arc.io/tx/0xcfa1…</a
+              >
+            </td>
+          </tr>
+          <tr>
+            <td>4</td>
+            <td>Mainnet contract</td>
+            <td>
+              <a
+                href="https://explorer.arc.io/address/0x08669613E30078839f92efCECCb5D6A6Cbb1778D"
+                >explorer.arc.io/address/0x0866…</a
+              >
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p><strong>Before record:</strong></p>
+      <ul class="check">
+        <li>Close unrelated tabs / mute notifications</li>
+        <li>Browser zoom ~100–110% so UI text is readable</li>
+        <li>Studio tab shows the PullPocket project</li>
+        <li>Live app shows <strong>Arc mainnet</strong> and contract <code>0x0866…778D</code></li>
+        <li>Explorer Open tx page fully loaded (Success visible)</li>
+        <li>Mic check; capture the browser window</li>
+        <li>Do <strong>not</strong> show private keys, seeds, or wallet unlock secrets</li>
+      </ul>
+
+      <h2>Timed beats (~2:30)</h2>
+      <p>Speak naturally; lines are a guide, not a teleprompter.</p>
+
+      <section class="beat">
+        <div class="label">Beat 1 — Hook <span class="clock">0:00–0:10</span></div>
+        <p><strong>On screen:</strong> Live app — full window, product title visible.</p>
+        <p class="say">
+          PullPocket — a prepaid native USDC tab on Arc. I lock USDC for one named
+          puller wallet; they pull against the balance; I can close anytime and
+          reclaim the rest. Built with Arc Studio for Arc Microgrants Round 2.
+        </p>
+      </section>
+
+      <section class="beat">
+        <div class="label">Beat 2 — Arc Studio <span class="clock">0:10–0:55</span></div>
+        <p>
+          <strong>On screen:</strong> Studio tab. Show project → contract / files →
+          tests or deploy → preview if available. Do not re-type the prompt.
+        </p>
+        <ol>
+          <li>Show Studio URL in the address bar 1–2 seconds.</li>
+          <li>Open PullPocket contract — point at <code>open</code> / <code>pull</code> / <code>close</code>.</li>
+          <li>Glance at tests green / testnet deploy if visible.</li>
+          <li>If preview available, show Open / Pull / Close once (no new txs needed).</li>
+        </ol>
+        <p class="say">
+          Here’s the Arc Studio project. I authored the Solidity contract and tests
+          in Studio, deployed to Arc Testnet from Studio, and wired a one-screen app
+          to that testnet address. Studio stays on testnet — that’s expected. Mainnet
+          came next, outside Studio, with the same contract and UI.
+        </p>
+        <p class="say">
+          Early proof on testnet — same open flow — before mainnet.
+          <span class="clock">(optional)</span>
+        </p>
+      </section>
+
+      <section class="beat">
+        <div class="label">Beat 3 — Product <span class="clock">0:55–1:20</span></div>
+        <p>
+          <strong>On screen:</strong> Live app (or Studio preview). Point at the three
+          actions and remaining balance.
+        </p>
+        <ol>
+          <li>Hover/click: <strong>Open</strong>, <strong>Pull</strong>, <strong>Close</strong>.</li>
+          <li>Call out remaining balance / puller field (no new tx required).</li>
+        </ol>
+        <p class="say">
+          One contract, one screen. Open locks native USDC — eighteen decimals, via
+          msg.value — for one puller. Pull withdraws up to what’s left. Close lets the
+          opener reclaim the rest. No EIP-712 vouchers, no payment-link wrapper.
+        </p>
+      </section>
+
+      <section class="beat">
+        <div class="label">Beat 4 — Live + mainnet proof <span class="clock">1:20–2:15</span></div>
+        <p><strong>On screen:</strong> Live app → explorer Open tx → optional contract page.</p>
+        <ol>
+          <li>
+            Show <strong>Arc mainnet</strong> and contract
+            <code>0x08669613E30078839f92efCECCb5D6A6Cbb1778D</code>.
+          </li>
+          <li>Switch to Open tx tab — Success + hash visible.</li>
+          <li>Optional contract page; do not linger.</li>
+        </ol>
+        <p class="say">
+          Live app is on GitHub Pages, pointed at Arc mainnet. Contract address
+          zero-x-oh-eight-six-six… — I’ll paste the full link in the submission. Here’s
+          the mainnet Open transaction on explorer.arc.io — real USDC locked through
+          the contract and the app. Deploy tx is also on mainnet explorer if you want
+          the create transaction.
+        </p>
+      </section>
+
+      <section class="beat">
+        <div class="label">Beat 5 — Close <span class="clock">2:15–2:30</span></div>
+        <p><strong>On screen:</strong> Studio tab (or flash GitHub briefly). Stop recording.</p>
+        <p class="say">
+          Built end-to-end with Arc Studio, exported and redeployed by me to Arc
+          mainnet. Code is public on GitHub — Mzee-oh-four slash pullpocket-dash.
+          Thanks for reviewing PullPocket for Arc Microgrants Round 2.
+        </p>
+      </section>
+
+      <h2>Timing cheat sheet</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Beat</th>
+            <th>Clock</th>
+            <th>Max</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Hook</td>
+            <td>0:00</td>
+            <td>10s</td>
+          </tr>
+          <tr>
+            <td>Studio</td>
+            <td>0:10</td>
+            <td>45s</td>
+          </tr>
+          <tr>
+            <td>Product</td>
+            <td>0:55</td>
+            <td>25s</td>
+          </tr>
+          <tr>
+            <td>Live + Open tx</td>
+            <td>1:20</td>
+            <td>55s</td>
+          </tr>
+          <tr>
+            <td>Close</td>
+            <td>2:15</td>
+            <td>15s</td>
+          </tr>
+          <tr>
+            <td><strong>Total</strong></td>
+            <td></td>
+            <td><strong>~2:30</strong></td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        If you run long: cut optional testnet / deploy-tx mentions. Never cut the
+        Studio URL or the mainnet Open tx.
+      </p>
+
+      <h2>Recording tips</h2>
+      <ul>
+        <li>Prefer 1080p, 16:9; browser only (no IDE clutter).</li>
+        <li>One continuous take is fine; soft cuts OK.</li>
+        <li>Do not broadcast seed / private key / <code>PRIVATE_KEY</code>.</li>
+      </ul>
+
+      <footer>
+        Source of truth also in repo
+        <a href="https://github.com/Mzee04/pullpocket-/blob/main/VIDEO_SCRIPT.md"
+          >VIDEO_SCRIPT.md</a
+        >.
+      </footer>
+    </main>
+  </body>
+</html>
