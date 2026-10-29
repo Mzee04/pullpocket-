@@ -288,6 +288,11 @@ button:not(:disabled):active {
   color: var(--mist);
 }
 
+.balance small .who {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
 .hint {
   font-size: 0.8rem;
   color: rgba(168, 207, 195, 0.75);

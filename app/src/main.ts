@@ -6,6 +6,7 @@ import {
   formatUnits,
   http,
   isAddress,
+  isHash,
   parseUnits,
   type Address,
   type Hash,
@@ -45,18 +46,35 @@ const TX_FEES = {
 } as const;
 
 /**
- * Stop looking after this long. A dropped broadcast never gets a receipt on
- * the public RPC, and the default viem wait (3 minutes) leaves the screen
- * stuck on "Waiting…".
+ * Arc blocks land in about a second, and eth_getTransactionReceipt on the
+ * public RPC answers in well under a second. Poll often, then stop.
+ *
+ * Do not use viem's waitForTransactionReceipt here. With replacement checks
+ * on, it asks eth_getTransaction first and, while that call is missing, never
+ * reads the receipt. When the timer fires it throws, which this screen was
+ * showing as "Open failed" with the explorer link gone — even if the tx had
+ * already mined.
  */
-const RECEIPT_TIMEOUT_MS = 30_000;
-const RECEIPT_POLL_MS = 1_500;
-const RECEIPT_RPC_TIMEOUT_MS = 4_000;
+const RECEIPT_TIMEOUT_MS = 20_000;
+const RECEIPT_POLL_MS = 1_000;
+const RECEIPT_RPC_TIMEOUT_MS = 8_000;
+/** After a mined tx, keep re-reading if the node still has the pre-tx tab. */
+const STATE_RETRY_MS = 5_000;
+const STATE_POLL_MS = 1_000;
+const STATE_RPC_TIMEOUT_MS = 3_000;
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+type TabState = {
+  remaining: bigint;
+  isOpen: boolean;
+  puller: Address;
+};
 
 let account: Address | null = null;
 let lastTx: Hash | null = null;
 let remaining = 0n;
 let isOpen = false;
+let tabPuller: Address | null = null;
 let actionGeneration = 0;
 let statusMsg = contractAddress
   ? `Ready on Arc ${network}. Connect a wallet to open, pull, or close.`
@@ -91,7 +109,41 @@ function setStatus(msg: string) {
   if (el) el.innerHTML = statusMarkup();
 }
 
+function balanceMarkup(): string {
+  const who =
+    isOpen && tabPuller && tabPuller.toLowerCase() !== ZERO_ADDRESS
+      ? ` · <span class="who">${short(tabPuller)}</span>`
+      : "";
+  const label = isOpen ? `open tab · remaining${who}` : "no open tab";
+  return `${formatUnits(remaining, USDC_DECIMALS)}<small><span class="pulse" aria-hidden="true"></span>${label} · Arc ${network}</small>`;
+}
+
+function paintBalance() {
+  const el = document.querySelector("#balance");
+  if (el) el.innerHTML = balanceMarkup();
+}
+
+function walletMarkup(): string {
+  return account
+    ? `<p class="wallet">${short(account)}</p>`
+    : `<button type="button" class="btn-connect" id="connect">Connect wallet</button>`;
+}
+
+function paintWallet() {
+  const slot = document.querySelector("#wallet-slot");
+  if (!slot) return;
+  slot.innerHTML = walletMarkup();
+  document.querySelector("#connect")?.addEventListener("click", connect);
+  const enabled = Boolean(contractAddress && account);
+  for (const id of ["open", "pull", "close"]) {
+    const button = document.querySelector(`#${id}`) as HTMLButtonElement | null;
+    if (button) button.disabled = !enabled;
+  }
+}
+
 function render() {
+  const pullerValue = (document.querySelector("#puller") as HTMLInputElement | null)?.value ?? "";
+  const amountValue = (document.querySelector("#amount") as HTMLInputElement | null)?.value ?? "";
   const configured = Boolean(contractAddress);
   app.innerHTML = `
     <main class="shell">
@@ -103,15 +155,10 @@ function render() {
       <section class="panel" aria-label="Tab controls">
         <div class="row">
           <p class="balance" id="balance">
-            ${formatUnits(remaining, USDC_DECIMALS)}
-            <small><span class="pulse" aria-hidden="true"></span>${isOpen ? "open tab · remaining" : "no open tab"} · Arc ${network}</small>
+            ${balanceMarkup()}
           </p>
-          <div>
-            ${
-              account
-                ? `<p class="wallet">${short(account)}</p>`
-                : `<button type="button" class="btn-connect" id="connect">Connect wallet</button>`
-            }
+          <div id="wallet-slot">
+            ${walletMarkup()}
           </div>
         </div>
 
@@ -145,6 +192,11 @@ function render() {
     </main>
   `;
 
+  const pullerInput = document.querySelector("#puller") as HTMLInputElement | null;
+  const amountInput = document.querySelector("#amount") as HTMLInputElement | null;
+  if (pullerInput && pullerValue) pullerInput.value = pullerValue;
+  if (amountInput && amountValue) amountInput.value = amountValue;
+
   document.querySelector("#connect")?.addEventListener("click", connect);
   document.querySelector("#open")?.addEventListener("click", onOpen);
   document.querySelector("#pull")?.addEventListener("click", onPull);
@@ -163,8 +215,9 @@ async function connect() {
     account = accounts[0] as Address;
     await ensureChain();
     setStatus(`Connected ${short(account)}.`);
+    paintWallet();
     await refreshState();
-    render();
+    paintBalance();
   } catch (err) {
     setStatus(`Connect failed: ${errMsg(err)}`);
   }
@@ -266,12 +319,36 @@ function receiptReaders(): PublicClient[] {
 
 async function readReceipt(hash: Hash, budgetMs: number): Promise<TransactionReceipt | null> {
   const rpcBudget = Math.min(RECEIPT_RPC_TIMEOUT_MS, Math.max(1, budgetMs));
-  const found = await Promise.all(
-    receiptReaders().map((client) =>
-      withTimeout(client.getTransactionReceipt({ hash }), rpcBudget).catch(() => null),
+  const tasks = receiptReaders().map((client) =>
+    withTimeout(client.getTransactionReceipt({ hash }), rpcBudget).then(
+      (receipt) => receipt,
+      () => null,
     ),
   );
-  return found.find((receipt) => receipt != null) ?? null;
+  // Resolve on the first real receipt. A wallet RPC that never answers must
+  // not hold up the public RPC, which is where a mined Arc tx shows up.
+  return new Promise((resolve) => {
+    let left = tasks.length;
+    let settled = false;
+    const finish = (receipt: TransactionReceipt | null) => {
+      if (settled) return;
+      if (receipt) {
+        settled = true;
+        resolve(receipt);
+        return;
+      }
+      left -= 1;
+      if (left === 0) {
+        settled = true;
+        resolve(null);
+      }
+    };
+    if (left === 0) {
+      resolve(null);
+      return;
+    }
+    for (const task of tasks) void task.then(finish);
+  });
 }
 
 /** Receipt, or null when neither RPC has one before the deadline. */
@@ -292,34 +369,105 @@ function successStatus(action: TabAction, hash: Hash): string {
   return `${lead} <a href="${explorerTx(hash)}" target="_blank" rel="noreferrer">View on explorer</a>`;
 }
 
+function isReceiptWaitTimeout(err: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const name = "name" in current ? String((current as { name: unknown }).name) : "";
+    if (name === "WaitForTransactionReceiptTimeoutError") return true;
+    if (/timed out while waiting for transaction/i.test(errMsg(current))) return true;
+    current = "cause" in current ? (current as { cause?: unknown }).cause : undefined;
+  }
+  return false;
+}
+
+function hashFromError(err: unknown): Hash | null {
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const match = errMsg(current).match(/0x[a-fA-F0-9]{64}/);
+    if (match && isHash(match[0])) return match[0];
+    current = "cause" in current ? (current as { cause?: unknown }).cause : undefined;
+  }
+  return null;
+}
+
+function snapshotTab(): TabState {
+  return {
+    remaining,
+    isOpen,
+    puller: tabPuller ?? (ZERO_ADDRESS as Address),
+  };
+}
+
+function sameTab(a: TabState, b: TabState): boolean {
+  return (
+    a.remaining === b.remaining &&
+    a.isOpen === b.isOpen &&
+    a.puller.toLowerCase() === b.puller.toLowerCase()
+  );
+}
+
+async function settleAction(action: TabAction, hash: Hash, generation: number, before: TabState) {
+  // Set the hash before any status write so the explorer link cannot be wiped.
+  lastTx = hash;
+  if (generation === actionGeneration) {
+    setStatus(`${action} submitted. Waiting…`);
+  } else {
+    setStatus(statusMsg);
+  }
+
+  let receipt = await waitForReceipt(hash);
+  if (generation !== actionGeneration || lastTx !== hash) return;
+
+  if (!receipt) {
+    // The tx may have mined as the wait ended. Read the receipt once more
+    // before calling the action failed.
+    receipt = await readReceipt(hash, RECEIPT_RPC_TIMEOUT_MS);
+    if (generation !== actionGeneration || lastTx !== hash) return;
+  }
+
+  if (!receipt) {
+    setStatus(`${action} still pending or not found. Check your wallet.`);
+    await refreshState({ untilDiffersFrom: before });
+    if (generation !== actionGeneration || lastTx !== hash) return;
+    paintBalance();
+    return;
+  }
+  if (receipt.status !== "success") {
+    setStatus(`${action} failed: transaction reverted.`);
+    await refreshState();
+    if (generation !== actionGeneration || lastTx !== hash) return;
+    paintBalance();
+    return;
+  }
+  setStatus(successStatus(action, hash));
+  await refreshState({ untilDiffersFrom: before });
+  if (generation !== actionGeneration || lastTx !== hash) return;
+  // Paint in place. Rebuilding #app replays the entrance animation and clears
+  // the form, which reads as a reload, and it would drop the success link
+  // until the next status write.
+  paintBalance();
+}
+
 async function runAction(action: TabAction, send: () => Promise<Hash>) {
   const generation = ++actionGeneration;
+  const before = snapshotTab();
   try {
     const hash = await send();
-    // Always keep the hash the wallet just returned, even if another click
-    // started while the prompt was open. Otherwise the explorer link is lost.
-    lastTx = hash;
-    if (generation === actionGeneration) {
-      setStatus(`${action} submitted. Waiting…`);
-    } else {
-      setStatus(statusMsg);
-    }
-    const receipt = await waitForReceipt(hash);
-    if (generation !== actionGeneration || lastTx !== hash) return;
-    if (!receipt) {
-      setStatus(`${action} still pending or not found. Check your wallet.`);
-      return;
-    }
-    if (receipt.status !== "success") {
-      setStatus(`${action} failed: transaction reverted.`);
-      return;
-    }
-    setStatus(successStatus(action, hash));
-    await refreshState();
-    if (generation !== actionGeneration) return;
-    render();
+    await settleAction(action, hash, generation, before);
   } catch (err) {
     if (generation !== actionGeneration) return;
+    const recovered = hashFromError(err);
+    // Wallet or viem timed out waiting, but the hash was broadcast. Keep the
+    // link up and look for the receipt ourselves.
+    if (recovered && isReceiptWaitTimeout(err)) {
+      await settleAction(action, recovered, generation, before);
+      return;
+    }
+    if (recovered) lastTx = recovered;
     setStatus(`${action} failed: ${errMsg(err)}`);
   }
 }
@@ -375,26 +523,97 @@ async function onClose() {
   });
 }
 
-async function refreshState() {
-  if (!contractAddress) return;
+async function readTabFrom(client: PublicClient): Promise<TabState | null> {
+  if (!contractAddress) return null;
   try {
-    const [rem, open] = await Promise.all([
-      publicClient.readContract({
+    const [rem, open, who] = await Promise.all([
+      client.readContract({
         address: contractAddress,
         abi: pullPocketAbi,
         functionName: "remaining",
       }),
-      publicClient.readContract({
+      client.readContract({
         address: contractAddress,
         abi: pullPocketAbi,
         functionName: "isOpen",
       }),
+      client.readContract({
+        address: contractAddress,
+        abi: pullPocketAbi,
+        functionName: "puller",
+      }),
     ]);
-    remaining = rem as bigint;
-    isOpen = open as boolean;
+    return { remaining: rem, isOpen: open, puller: who };
   } catch {
-    // Contract may not be deployed on this network yet.
+    return null;
   }
+}
+
+function pickTab(results: TabState[], previous?: TabState): TabState | null {
+  if (results.length === 0) return null;
+  if (previous) {
+    const changed = results.find((item) => !sameTab(item, previous));
+    if (changed) return changed;
+  }
+  // A lagging node still reports the closed tab. An open reading is the one
+  // that has the mined Open.
+  return results.find((item) => item.isOpen) ?? results[0];
+}
+
+/** One combined read. A changed post-tx result returns without waiting on the slower RPC. */
+async function readTab(previous?: TabState): Promise<TabState | null> {
+  const tasks = receiptReaders().map((client) =>
+    withTimeout(readTabFrom(client), STATE_RPC_TIMEOUT_MS).catch(() => null),
+  );
+  return new Promise((resolve) => {
+    let left = tasks.length;
+    let settled = false;
+    const got: TabState[] = [];
+    const finish = (value: TabState | null) => {
+      if (settled) return;
+      if (value) {
+        got.push(value);
+        if (previous && !sameTab(value, previous)) {
+          settled = true;
+          resolve(value);
+          return;
+        }
+      }
+      left -= 1;
+      if (left === 0) {
+        settled = true;
+        resolve(pickTab(got, previous));
+      }
+    };
+    if (left === 0) {
+      resolve(null);
+      return;
+    }
+    for (const task of tasks) void task.then(finish);
+  });
+}
+
+function applyTab(state: TabState) {
+  remaining = state.remaining;
+  isOpen = state.isOpen;
+  tabPuller = state.puller;
+}
+
+async function refreshState(opts?: { untilDiffersFrom?: TabState }) {
+  if (!contractAddress) return;
+  const previous = opts?.untilDiffersFrom;
+  const deadline = Date.now() + (previous ? STATE_RETRY_MS : STATE_RPC_TIMEOUT_MS);
+  let picked: TabState | null = null;
+  do {
+    const next = await readTab(previous);
+    if (next) {
+      picked = next;
+      if (!previous || !sameTab(next, previous)) break;
+    }
+    if (Date.now() >= deadline) break;
+    await sleep(Math.min(STATE_POLL_MS, Math.max(0, deadline - Date.now())));
+  } while (Date.now() < deadline);
+  if (picked) applyTab(picked);
 }
 
 function errMsg(err: unknown): string {
@@ -406,12 +625,20 @@ function errMsg(err: unknown): string {
 }
 
 render();
-refreshState().then(render);
+void refreshState().then(() => paintBalance());
 
 if (window.ethereum?.on) {
   window.ethereum.on("accountsChanged", (accs) => {
     const list = accs as string[];
-    account = list[0] ? (list[0] as Address) : null;
-    render();
+    const next = list[0] ? (list[0] as Address) : null;
+    // Rabby emits this again after a send, with the same account. Rebuilding
+    // the page then clears the form and replays the entrance animation.
+    if ((next ?? "").toLowerCase() === (account ?? "").toLowerCase()) return;
+    account = next;
+    paintWallet();
+    void refreshState().then(() => paintBalance());
+  });
+  window.ethereum.on("chainChanged", () => {
+    void refreshState().then(() => paintBalance());
   });
 }
