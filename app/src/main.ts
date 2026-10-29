@@ -6,6 +6,7 @@ import {
   formatUnits,
   http,
   isAddress,
+  isHash,
   parseUnits,
   type Address,
   type Hash,
@@ -45,13 +46,18 @@ const TX_FEES = {
 } as const;
 
 /**
- * Stop looking after this long. A dropped broadcast never gets a receipt on
- * the public RPC, and the default viem wait (3 minutes) leaves the screen
- * stuck on "Waiting…".
+ * Arc blocks land in about a second, and eth_getTransactionReceipt on the
+ * public RPC answers in well under a second. Poll often, then stop.
+ *
+ * Do not use viem's waitForTransactionReceipt here. With replacement checks
+ * on, it asks eth_getTransaction first and, while that call is missing, never
+ * reads the receipt. When the timer fires it throws, which this screen was
+ * showing as "Open failed" with the explorer link gone — even if the tx had
+ * already mined.
  */
-const RECEIPT_TIMEOUT_MS = 30_000;
-const RECEIPT_POLL_MS = 1_500;
-const RECEIPT_RPC_TIMEOUT_MS = 4_000;
+const RECEIPT_TIMEOUT_MS = 20_000;
+const RECEIPT_POLL_MS = 1_000;
+const RECEIPT_RPC_TIMEOUT_MS = 8_000;
 
 let account: Address | null = null;
 let lastTx: Hash | null = null;
@@ -91,6 +97,16 @@ function setStatus(msg: string) {
   if (el) el.innerHTML = statusMarkup();
 }
 
+function balanceMarkup(): string {
+  const label = isOpen ? "open tab · remaining" : "no open tab";
+  return `${formatUnits(remaining, USDC_DECIMALS)}<small><span class="pulse" aria-hidden="true"></span>${label} · Arc ${network}</small>`;
+}
+
+function paintBalance() {
+  const el = document.querySelector("#balance");
+  if (el) el.innerHTML = balanceMarkup();
+}
+
 function render() {
   const configured = Boolean(contractAddress);
   app.innerHTML = `
@@ -103,8 +119,7 @@ function render() {
       <section class="panel" aria-label="Tab controls">
         <div class="row">
           <p class="balance" id="balance">
-            ${formatUnits(remaining, USDC_DECIMALS)}
-            <small><span class="pulse" aria-hidden="true"></span>${isOpen ? "open tab · remaining" : "no open tab"} · Arc ${network}</small>
+            ${balanceMarkup()}
           </p>
           <div>
             ${
@@ -266,12 +281,36 @@ function receiptReaders(): PublicClient[] {
 
 async function readReceipt(hash: Hash, budgetMs: number): Promise<TransactionReceipt | null> {
   const rpcBudget = Math.min(RECEIPT_RPC_TIMEOUT_MS, Math.max(1, budgetMs));
-  const found = await Promise.all(
-    receiptReaders().map((client) =>
-      withTimeout(client.getTransactionReceipt({ hash }), rpcBudget).catch(() => null),
+  const tasks = receiptReaders().map((client) =>
+    withTimeout(client.getTransactionReceipt({ hash }), rpcBudget).then(
+      (receipt) => receipt,
+      () => null,
     ),
   );
-  return found.find((receipt) => receipt != null) ?? null;
+  // Resolve on the first real receipt. A wallet RPC that never answers must
+  // not hold up the public RPC, which is where a mined Arc tx shows up.
+  return new Promise((resolve) => {
+    let left = tasks.length;
+    let settled = false;
+    const finish = (receipt: TransactionReceipt | null) => {
+      if (settled) return;
+      if (receipt) {
+        settled = true;
+        resolve(receipt);
+        return;
+      }
+      left -= 1;
+      if (left === 0) {
+        settled = true;
+        resolve(null);
+      }
+    };
+    if (left === 0) {
+      resolve(null);
+      return;
+    }
+    for (const task of tasks) void task.then(finish);
+  });
 }
 
 /** Receipt, or null when neither RPC has one before the deadline. */
@@ -292,34 +331,85 @@ function successStatus(action: TabAction, hash: Hash): string {
   return `${lead} <a href="${explorerTx(hash)}" target="_blank" rel="noreferrer">View on explorer</a>`;
 }
 
+function isReceiptWaitTimeout(err: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const name = "name" in current ? String((current as { name: unknown }).name) : "";
+    if (name === "WaitForTransactionReceiptTimeoutError") return true;
+    if (/timed out while waiting for transaction/i.test(errMsg(current))) return true;
+    current = "cause" in current ? (current as { cause?: unknown }).cause : undefined;
+  }
+  return false;
+}
+
+function hashFromError(err: unknown): Hash | null {
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const match = errMsg(current).match(/0x[a-fA-F0-9]{64}/);
+    if (match && isHash(match[0])) return match[0];
+    current = "cause" in current ? (current as { cause?: unknown }).cause : undefined;
+  }
+  return null;
+}
+
+async function settleAction(action: TabAction, hash: Hash, generation: number) {
+  // Set the hash before any status write so the explorer link cannot be wiped.
+  lastTx = hash;
+  if (generation === actionGeneration) {
+    setStatus(`${action} submitted. Waiting…`);
+  } else {
+    setStatus(statusMsg);
+  }
+
+  let receipt = await waitForReceipt(hash);
+  if (generation !== actionGeneration || lastTx !== hash) return;
+
+  if (!receipt) {
+    // The tx may have mined as the wait ended. Read the tab and the receipt
+    // once more, together, before calling the action failed.
+    const [, again] = await Promise.all([
+      refreshState(),
+      readReceipt(hash, RECEIPT_RPC_TIMEOUT_MS),
+    ]);
+    receipt = again;
+    if (generation !== actionGeneration || lastTx !== hash) return;
+  }
+
+  if (!receipt) {
+    setStatus(`${action} still pending or not found. Check your wallet.`);
+    paintBalance();
+    return;
+  }
+  if (receipt.status !== "success") {
+    setStatus(`${action} failed: transaction reverted.`);
+    paintBalance();
+    return;
+  }
+  setStatus(successStatus(action, hash));
+  await refreshState();
+  if (generation !== actionGeneration || lastTx !== hash) return;
+  render();
+}
+
 async function runAction(action: TabAction, send: () => Promise<Hash>) {
   const generation = ++actionGeneration;
   try {
     const hash = await send();
-    // Always keep the hash the wallet just returned, even if another click
-    // started while the prompt was open. Otherwise the explorer link is lost.
-    lastTx = hash;
-    if (generation === actionGeneration) {
-      setStatus(`${action} submitted. Waiting…`);
-    } else {
-      setStatus(statusMsg);
-    }
-    const receipt = await waitForReceipt(hash);
-    if (generation !== actionGeneration || lastTx !== hash) return;
-    if (!receipt) {
-      setStatus(`${action} still pending or not found. Check your wallet.`);
-      return;
-    }
-    if (receipt.status !== "success") {
-      setStatus(`${action} failed: transaction reverted.`);
-      return;
-    }
-    setStatus(successStatus(action, hash));
-    await refreshState();
-    if (generation !== actionGeneration) return;
-    render();
+    await settleAction(action, hash, generation);
   } catch (err) {
     if (generation !== actionGeneration) return;
+    const recovered = hashFromError(err);
+    // Wallet or viem timed out waiting, but the hash was broadcast. Keep the
+    // link up and look for the receipt ourselves.
+    if (recovered && isReceiptWaitTimeout(err)) {
+      await settleAction(action, recovered, generation);
+      return;
+    }
+    if (recovered) lastTx = recovered;
     setStatus(`${action} failed: ${errMsg(err)}`);
   }
 }
