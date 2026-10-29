@@ -9,6 +9,8 @@ import {
   parseUnits,
   type Address,
   type Hash,
+  type PublicClient,
+  type TransactionReceipt,
 } from "viem";
 import { pullPocketAbi } from "./abi";
 import {
@@ -36,13 +38,31 @@ const publicClient = createPublicClient({
   transport: http(),
 });
 
+/** Arc mempool floor is 20 gwei. Stay above it. */
+const TX_FEES = {
+  maxFeePerGas: 25n * 10n ** 9n,
+  maxPriorityFeePerGas: 1n * 10n ** 9n,
+} as const;
+
+/**
+ * Stop looking after this long. A dropped broadcast never gets a receipt on
+ * the public RPC, and the default viem wait (3 minutes) leaves the screen
+ * stuck on "Waiting…".
+ */
+const RECEIPT_TIMEOUT_MS = 30_000;
+const RECEIPT_POLL_MS = 1_500;
+const RECEIPT_RPC_TIMEOUT_MS = 4_000;
+
 let account: Address | null = null;
 let lastTx: Hash | null = null;
 let remaining = 0n;
 let isOpen = false;
+let actionGeneration = 0;
 let statusMsg = contractAddress
   ? `Ready on Arc ${network}. Connect a wallet to open, pull, or close.`
   : "Set VITE_CONTRACT_ADDRESS after deploy. UI works; txs need a contract.";
+
+type TabAction = "Open" | "Pull" | "Close";
 
 function explorerTx(hash: Hash): string {
   return `${chain.blockExplorers.default.url}/tx/${hash}`;
@@ -56,10 +76,19 @@ function short(addr: string): string {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
+/** Status HTML, including the explorer link for the latest hash. */
+function statusMarkup(): string {
+  if (!lastTx) return statusMsg;
+  const link = `<a href="${explorerTx(lastTx)}" target="_blank" rel="noreferrer">last tx</a>`;
+  return `${statusMsg} · ${link}`;
+}
+
 function setStatus(msg: string) {
   statusMsg = msg;
   const el = document.querySelector("#status");
-  if (el) el.innerHTML = msg;
+  // render() is not called again until the action finishes. Writing only the
+  // message here used to wipe the explorer link for the whole wait.
+  if (el) el.innerHTML = statusMarkup();
 }
 
 function render() {
@@ -111,11 +140,7 @@ function render() {
           }
         </p>
 
-        <div class="status" id="status">${statusMsg}${
-          lastTx
-            ? ` · <a href="${explorerTx(lastTx)}" target="_blank" rel="noreferrer">last tx</a>`
-            : ""
-        }</div>
+        <div class="status" id="status">${statusMarkup()}</div>
       </section>
     </main>
   `;
@@ -200,81 +225,154 @@ function readPuller(): Address {
   return raw;
 }
 
-async function onOpen() {
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timeout")), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+/**
+ * Rabby (and other wallets) can broadcast on an RPC the app's public client
+ * never sees. Ask the wallet's provider as well as the public RPC.
+ */
+function receiptReaders(): PublicClient[] {
+  const readers: PublicClient[] = [publicClient];
+  if (window.ethereum) {
+    readers.push(
+      createPublicClient({
+        chain,
+        transport: custom(window.ethereum),
+      }),
+    );
+  }
+  return readers;
+}
+
+async function readReceipt(hash: Hash, budgetMs: number): Promise<TransactionReceipt | null> {
+  const rpcBudget = Math.min(RECEIPT_RPC_TIMEOUT_MS, Math.max(1, budgetMs));
+  const found = await Promise.all(
+    receiptReaders().map((client) =>
+      withTimeout(client.getTransactionReceipt({ hash }), rpcBudget).catch(() => null),
+    ),
+  );
+  return found.find((receipt) => receipt != null) ?? null;
+}
+
+/** Receipt, or null when neither RPC has one before the deadline. */
+async function waitForReceipt(hash: Hash): Promise<TransactionReceipt | null> {
+  const deadline = Date.now() + RECEIPT_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const receipt = await readReceipt(hash, deadline - Date.now());
+    if (receipt) return receipt;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return null;
+    await sleep(Math.min(RECEIPT_POLL_MS, remaining));
+  }
+  return null;
+}
+
+function successStatus(action: TabAction, hash: Hash): string {
+  const lead = action === "Open" ? "Tab open." : action === "Pull" ? "Pulled." : "Closed.";
+  return `${lead} <a href="${explorerTx(hash)}" target="_blank" rel="noreferrer">View on explorer</a>`;
+}
+
+async function runAction(action: TabAction, send: () => Promise<Hash>) {
+  const generation = ++actionGeneration;
   try {
+    const hash = await send();
+    // Always keep the hash the wallet just returned, even if another click
+    // started while the prompt was open. Otherwise the explorer link is lost.
+    lastTx = hash;
+    if (generation === actionGeneration) {
+      setStatus(`${action} submitted. Waiting…`);
+    } else {
+      setStatus(statusMsg);
+    }
+    const receipt = await waitForReceipt(hash);
+    if (generation !== actionGeneration || lastTx !== hash) return;
+    if (!receipt) {
+      setStatus(`${action} still pending or not found. Check your wallet.`);
+      return;
+    }
+    if (receipt.status !== "success") {
+      setStatus(`${action} failed: transaction reverted.`);
+      return;
+    }
+    setStatus(successStatus(action, hash));
+    await refreshState();
+    if (generation !== actionGeneration) return;
+    render();
+  } catch (err) {
+    if (generation !== actionGeneration) return;
+    setStatus(`${action} failed: ${errMsg(err)}`);
+  }
+}
+
+async function onOpen() {
+  await runAction("Open", async () => {
     const address = requireContract();
     const puller = readPuller();
     const value = readAmount();
     await ensureChain();
     const wallet = walletClient();
     setStatus("Confirm open in your wallet…");
-    const hash = await wallet.writeContract({
+    return wallet.writeContract({
       address,
       abi: pullPocketAbi,
       functionName: "open",
       args: [puller],
       value,
-      // Arc mempool floor: maxFeePerGas >= 20 gwei
-      maxFeePerGas: 25n * 10n ** 9n,
-      maxPriorityFeePerGas: 1n * 10n ** 9n,
+      ...TX_FEES,
     });
-    lastTx = hash;
-    setStatus(`Open submitted. Waiting…`);
-    await publicClient.waitForTransactionReceipt({ hash });
-    setStatus(`Tab open. <a href="${explorerTx(hash)}" target="_blank" rel="noreferrer">View on explorer</a>`);
-    await refreshState();
-    render();
-  } catch (err) {
-    setStatus(`Open failed: ${errMsg(err)}`);
-  }
+  });
 }
 
 async function onPull() {
-  try {
+  await runAction("Pull", async () => {
     const address = requireContract();
     const amount = readAmount();
     await ensureChain();
     const wallet = walletClient();
     setStatus("Confirm pull in your wallet…");
-    const hash = await wallet.writeContract({
+    return wallet.writeContract({
       address,
       abi: pullPocketAbi,
       functionName: "pull",
       args: [amount],
-      maxFeePerGas: 25n * 10n ** 9n,
-      maxPriorityFeePerGas: 1n * 10n ** 9n,
+      ...TX_FEES,
     });
-    lastTx = hash;
-    await publicClient.waitForTransactionReceipt({ hash });
-    setStatus(`Pulled. <a href="${explorerTx(hash)}" target="_blank" rel="noreferrer">View on explorer</a>`);
-    await refreshState();
-    render();
-  } catch (err) {
-    setStatus(`Pull failed: ${errMsg(err)}`);
-  }
+  });
 }
 
 async function onClose() {
-  try {
+  await runAction("Close", async () => {
     const address = requireContract();
     await ensureChain();
     const wallet = walletClient();
     setStatus("Confirm close in your wallet…");
-    const hash = await wallet.writeContract({
+    return wallet.writeContract({
       address,
       abi: pullPocketAbi,
       functionName: "close",
-      maxFeePerGas: 25n * 10n ** 9n,
-      maxPriorityFeePerGas: 1n * 10n ** 9n,
+      ...TX_FEES,
     });
-    lastTx = hash;
-    await publicClient.waitForTransactionReceipt({ hash });
-    setStatus(`Closed. <a href="${explorerTx(hash)}" target="_blank" rel="noreferrer">View on explorer</a>`);
-    await refreshState();
-    render();
-  } catch (err) {
-    setStatus(`Close failed: ${errMsg(err)}`);
-  }
+  });
 }
 
 async function refreshState() {
